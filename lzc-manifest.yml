@@ -1,0 +1,39 @@
+application:
+  subdomain: vigil
+  multi_instance: false
+  # The status page is meant to be publicly readable, but this instance stays
+  # behind the platform entry login like every other app in this batch.
+  upstreams:
+    - location: /package-licenses/
+      backend: file:///lzcapp/pkg/content/licenses/
+    - location: /
+      backend: http://vigil:8080/
+
+services:
+  vigil:
+    # upstream: valeriansaliou/vigil:v1.29.0
+    image: docker.1ms.run/valeriansaliou/vigil:v1.29.0
+    environment:
+      - |-
+        VIGIL_MANAGER_TOKEN={{ stable_secret "vigil_manager_token" | replace "\r" "" | replace "\n" "" }}
+      - |-
+        VIGIL_REPORTER_TOKEN={{ stable_secret "vigil_reporter_token" | replace "\r" "" | replace "\n" "" }}
+      - TZ=Asia/Shanghai
+    command: sh /lzcapp/pkg/content/start.sh
+
+usage: |
+  Vigil 是微服务状态页：按你配置的地址定时探测，把各个服务的健康状态展示在一个页面上。
+
+  使用方法：
+  1. 打开应用就能看到状态页，默认只有一个「自检」服务在监测自己，用来确认服务已跑起来。
+  2. 要监测自己的服务，需要在打包进应用的 config.cfg 末尾追加 node 与 service 段（格式见文件内注释），重新打包部署后生效。
+
+  数据与安全：
+  - 本应用不保存历史数据，状态实时探测得出，因此没有需要备份的业务数据。
+  - 管理接口用的 manager/reporter token 由平台稳定密钥生成，每个部署不同，不会使用上游示例里的占位值。
+  - 应用经懒猫入口鉴权访问。
+
+  说明：
+  - 探测目标由配置文件决定，本包预置的是指向自身的自检项，不会主动访问外部网络。
+  - 监测目标写死在随包配置里，改动需重新打包；页面本身开箱即用。
+  - 未做真机验证：状态页渲染、探测执行、配置修改后重启生效均未在设备上实测。

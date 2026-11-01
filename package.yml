@@ -1,0 +1,18 @@
+package: community.lazycat.app.vigil
+version: 1.29.0
+name: Vigil
+description: "Microservices status page that polls your endpoints and reports health."
+min_os_version: "1.5.0"
+homepage: https://github.com/valeriansaliou/vigil
+author: valeriansaliou
+license: MPL-2.0
+permissions:
+  required:
+    - net.internet
+locales:
+  zh:
+    name: Vigil
+    description: "微服务状态页：定时轮询你配置的服务端点，在公开页面展示健康状态。"
+  en:
+    name: Vigil
+    description: "Microservices status page that polls your endpoints and reports health."
