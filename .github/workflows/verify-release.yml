@@ -1,0 +1,131 @@
+name: Verify Vigil Release on GitHub
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact LPK release tag
+        required: true
+        default: v1.29.0
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: vigil-release-verification
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Download exact Release asset on runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET_NAME="community.lazycat.app.vigil-${RELEASE_TAG}.lpk"
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+          gh release view "$RELEASE_TAG" --json tagName,assets > release-metadata.json
+          gh release download "$RELEASE_TAG" --pattern "$ASSET_NAME" --dir verify-pkg
+      - name: Verify artifact, token rendering and no placeholder credentials
+        shell: python
+        run: |
+          import hashlib, json, os, subprocess, sys, tarfile
+          from pathlib import Path
+
+          try:
+              import yaml
+          except ImportError:
+              subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'PyYAML==6.0.3'])
+              import yaml
+
+          name = os.environ['ASSET_NAME']
+          tag = os.environ['RELEASE_TAG']
+          version = tag.removeprefix('v')
+
+          meta = json.loads(Path('release-metadata.json').read_text())
+          assets = [a for a in meta['assets'] if a['name'] == name]
+          assert len(assets) == 1, assets
+          pkg = Path('verify-pkg') / name
+
+          h = hashlib.sha256()
+          with pkg.open('rb') as f:
+              for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
+                  h.update(chunk)
+          assert 'sha256:' + h.hexdigest() == assets[0]['digest'], 'Release digest mismatch'
+
+          with tarfile.open(pkg) as package:
+              names = set(package.getnames())
+              assert {'package.yml', 'manifest.yml', 'content.tar', 'icon.png'} <= names, names
+
+              info = yaml.safe_load(package.extractfile('package.yml').read())
+              assert info['package'] == 'community.lazycat.app.vigil'
+              assert str(info['version']) == version
+              assert info['name'] == 'Vigil'
+              assert info['license'] == 'MPL-2.0'
+              assert str(info['min_os_version']) == '1.5.0'
+
+              text = package.extractfile('manifest.yml').read().decode()
+              m = yaml.safe_load(text)
+              app = m['application']
+              assert app['subdomain'] == 'vigil'
+              upstreams = app['upstreams']
+              assert any(u['location'] == '/package-licenses/' and u['backend'].startswith('file://') for u in upstreams)
+              assert any(u['location'] == '/' and u['backend'] == 'http://vigil:8080/' for u in upstreams)
+              assert 'public_path' not in app
+
+              svc = m['services']['vigil']
+              assert 'valeriansaliou/vigil' in svc['image'], svc['image']
+              assert svc['command'] == 'sh /lzcapp/pkg/content/start.sh'
+              env = '\n'.join(svc['environment'])
+              assert 'stable_secret' in env and 'vigil_manager_token' in env
+              assert 'stable_secret' in env and 'vigil_reporter_token' in env
+              # Live status only; nothing to persist.
+              assert 'binds' not in svc, svc.get('binds')
+              assert 'healthcheck' not in text
+              assert 'lzc-file-chooser' not in text
+              assert not [n for n in names if n.endswith('deploy_params.yml')]
+
+              with tarfile.open(fileobj=package.extractfile('content.tar')) as content:
+                  members = content.getnames()
+
+                  def read(target):
+                      hits = [n for n in members if n.removeprefix('./') == target]
+                      assert len(hits) == 1, (target, hits)
+                      return content.extractfile(hits[0]).read().decode()
+
+                  start = read('start.sh')
+                  conf = read('config.cfg')
+                  lic = [n for n in members if 'licenses/' in n]
+                  assert lic, members
+                  license_text = content.extractfile(lic[0]).read().decode()
+
+              # Placeholders must not survive into the shipped config.
+              assert '__VIGIL_MANAGER_TOKEN__' in conf
+              assert '__VIGIL_REPORTER_TOKEN__' in conf
+              assert 'REPLACE_THIS_WITH_A_VERY_SECRET_KEY' not in conf
+              assert 'REPLACE_THIS_WITH_A_SECRET_KEY' not in conf
+              # Local-only self check; the default must not poll the vendor's site.
+              assert 'status.crisp.chat' not in conf
+              assert '127.0.0.1:8080' in conf
+              # Icon/logo must not reference files the image does not ship.
+              assert 'favicon.svg' not in conf
+
+              assert 'sed' in start and '__VIGIL_MANAGER_TOKEN__' in start
+              assert 'refusing to start' in start
+              assert '/run/vigil' in start
+              assert 'chmod 600' in start
+              assert 'cd /usr/src/vigil' in start
+              assert 'Mozilla Public License' in license_text
+
+          result = {
+              'verified': True,
+              'tag': tag,
+              'sha256': h.hexdigest(),
+              'size': pkg.stat().st_size,
+              'runtime_tested': False,
+          }
+          print(json.dumps(result))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('Independent cloud artifact verification\n\n' + json.dumps(result, indent=2) + '\n')
